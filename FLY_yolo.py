@@ -41,23 +41,31 @@ LEVEL_SCORES = {
 # TOTAL FLY COUNT INPUT
 # =========================
 TOTAL_FLIES_PER_TUBE = [
-    15,  # Tube 1
-    15,  # Tube 2
-    15,  # Tube 3
-    15,  # Tube 4
-    15   # Tube 5
+    0,  # Tube 1
+    0,  # Tube 2
+    0,  # Tube 3
+    0,  # Tube 4
+    0   # Tube 5
 ]
 
 # =========================
 # TUBE CONFIGS
 # =========================
 TUBE_CONFIGS = [
-    {'offset_from_left': 420,  'width': 180, 'top_offset': 40,  'bottom_offset': 0},
-    {'offset_from_left': 620,  'width': 200, 'top_offset': 40, 'bottom_offset': 0},
-    {'offset_from_left': 850,  'width': 190, 'top_offset': 40, 'bottom_offset': 0},
-    {'offset_from_left': 1110, 'width': 185, 'top_offset': 40, 'bottom_offset': 0},
-    {'offset_from_left': 1350, 'width': 195, 'top_offset': 40, 'bottom_offset': 0},
+    {'offset_from_left': 280,  'width': 200, 'top_offset': 40, 'bottom_offset': 3},
+    {'offset_from_left': 540,  'width': 200, 'top_offset': 40, 'bottom_offset': 3},
+    {'offset_from_left': 815,  'width': 200, 'top_offset': 40, 'bottom_offset': 3},
+    {'offset_from_left': 1095, 'width': 200, 'top_offset': 40, 'bottom_offset': 3},
+    {'offset_from_left': 1375, 'width': 215, 'top_offset': 40, 'bottom_offset': 3},
 ]
+
+USE_RELATIVE_SPACING = False
+
+# =========================
+# SIDEBAR CONFIG
+# =========================
+SIDEBAR_WIDTH = 400
+SIDEBAR_COLOR = (210, 210, 210)  # สีเทาเข้ม
 
 # =========================
 # YOLO CONFIG
@@ -403,7 +411,7 @@ def process_image(img_path):
             if i == 4:  # หลอดที่ 5
                 label_text = f"L{display_level}"
                 label_x = x_end + 15
-                label_y = y_draw + 10
+                label_y = y_draw - 55
                 
                 cv2.putText(orig, label_text,
                            (label_x, label_y),
@@ -424,47 +432,24 @@ def process_image(img_path):
         print(f"Tube {i+1}: Total = {fly_counts[i]} flies (Detected: {tube_fly_count})")
         print(f"  Levels : {level_counts[::-1]}")
 
-    # DRAW LEGEND
-    legend_x = w_img - 280
-    legend_y = 20
-    legend_w = 200
-    legend_h = 220
-    line_spacing = 30
 
-    cv2.rectangle(orig, 
-                  (legend_x, legend_y), 
-                  (legend_x + legend_w, legend_y + legend_h),
-                  (0, 0, 0), -1)
-
-    cv2.rectangle(orig, 
-                  (legend_x, legend_y), 
-                  (legend_x + legend_w, legend_y + legend_h),
-                  (255, 255, 255), 2)
-
-    cv2.putText(orig, "Level Colors",
-                (legend_x + 10, legend_y + 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-    for idx, level_num in enumerate([5, 4, 3, 2, 1]):
-        y_pos = legend_y + 50 + idx * line_spacing
-        color = LEVEL_COLORS[level_num]
-        
-        cv2.line(orig,
-                 (legend_x + 10, y_pos),
-                 (legend_x + 60, y_pos),
-                 color, 3)
-        
-        cv2.putText(orig, f"L{level_num}",
-                    (legend_x + 70, y_pos + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-    # DRAW TABLE (เหมือนเดิม)
+    # =========================
+    # สร้างภาพใหม่พร้อม SIDEBAR
+    # =========================
+    h_orig, w_orig = orig.shape[:2]
+    new_img = np.zeros((h_orig, w_orig + SIDEBAR_WIDTH, 3), dtype=np.uint8)
+    new_img[:, :] = SIDEBAR_COLOR  # เติมสีพื้นหลัง
+    new_img[:, SIDEBAR_WIDTH:] = orig  # วางภาพต้นฉบับทางขวา
+    
+# =========================
+    # DRAW TABLE บน SIDEBAR
+    # =========================
     table_x = 20
-    table_y = 120
+    table_y = 140
     row_h = 35
     left_w = 60
     col_w = 60
-    font_scale = 0.7
+    font_scale = 0.65
     thick = 2
     header_gap = 5
 
@@ -478,88 +463,99 @@ def process_image(img_path):
 
     table_w = left_w + col_w * len(tubes)
     table_h = row_h * (len(levels) + 2) + header_gap
-
-    # Header box
-    cv2.rectangle(orig, (table_x, 40), 
-                  (table_x + 110, 120),
-                  (0, 0, 0), -1)
-    cv2.rectangle(orig, 
-                  (table_x, 40), 
-                  (table_x + 110, 120),
-                  (255, 255, 255), 2)
-    cv2.putText(orig, "Result", (table_x + 5, 75),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), thick)
+    
+    
+    # Header box - Drosophila No.
+    header_box_y = 30
+    header_box_h = 80
+    cv2.rectangle(new_img, (table_x, header_box_y+30), 
+                  (table_x + table_w-140, header_box_y + header_box_h+30),
+                  (0, 0, 0), -1)  # พื้นหลังเขียวเข้ม
+    cv2.rectangle(new_img, 
+                  (table_x, header_box_y+30), 
+                  (table_x + table_w-140, header_box_y + header_box_h+30),
+                  (255, 255, 255), 2)  # ขอบเขียว
+    cv2.putText(new_img, "Drosophila No.", (table_x + 13, header_box_y + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
     # Table background
-    cv2.rectangle(orig, (table_x, table_y-row_h),
+    cv2.rectangle(new_img, (table_x, table_y-row_h),
                   (table_x+table_w, table_y+table_h-25),
-                  (0,0,0), -1)
-    cv2.rectangle(orig, (table_x, table_y-row_h),
+                  (30, 30, 30), -1)
+    cv2.rectangle(new_img, (table_x, table_y-row_h),
                   (table_x+table_w, table_y+table_h-25),
-                  (255,255,255), 2)
+                  (200, 200, 200), 2)
 
     # Horizontal lines
-    cv2.line(orig, (table_x, table_y + header_gap), 
+    cv2.line(new_img, (table_x, table_y + header_gap), 
              (table_x+table_w, table_y + header_gap), 
-             (255,255,255), 1)
+             (200,200,200), 2)
 
     for r in range(len(levels)):
         y_line = table_y + header_gap + (r+1)*row_h
-        cv2.line(orig, (table_x, y_line), 
+        cv2.line(new_img, (table_x, y_line), 
                  (table_x+table_w, y_line), 
                  (100,100,100), 1)
 
     total_line_y = table_y + header_gap + (len(levels)+1)*row_h
-    cv2.line(orig, (table_x, total_line_y-row_h), 
+    cv2.line(new_img, (table_x, total_line_y-row_h), 
              (table_x+table_w, total_line_y-row_h), 
-             (255,255,255), 2)
+             (200,200,200), 2)
 
     # Vertical lines
-    cv2.line(orig, (table_x+left_w, table_y-row_h), 
+    cv2.line(new_img, (table_x+left_w, table_y-row_h), 
              (table_x+left_w, table_y+table_h-25), 
-             (255,255,255), 1)
+             (200,200,200), 2)
 
     for c in range(1, len(tubes)):
         x_line = table_x + left_w + c*col_w
-        cv2.line(orig, (x_line, table_y-row_h), 
+        cv2.line(new_img, (x_line, table_y-row_h), 
                  (x_line, table_y+table_h-25), 
                  (100,100,100), 1)
 
     # Header row
     header_y = table_y - 10
-    cv2.putText(orig, "Tube", (table_x + 5, header_y),
+    cv2.putText(new_img, "Tube", (table_x + 5, header_y),
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
     for i, t in enumerate(tubes):
         text_x = table_x + left_w + i*col_w + 15
-        cv2.putText(orig, t, (text_x, header_y),
+        cv2.putText(new_img, t, (text_x, header_y),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
-    # Data rows
+   # Data rows
     for r, lvl in enumerate(levels):
         y = table_y + header_gap + (r+1)*row_h - 10
         
-        cv2.putText(orig, lvl, (table_x + 15, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), thick)
+        # กำหนดสีของ label ตาม LEVEL_COLORS
+        level_index = 5 - r
+        if level_index in LEVEL_COLORS:
+            label_color = LEVEL_COLORS[level_index]
+        else:
+            label_color = (255, 255, 255)  # L0 เป็นสีขาว
+        
+        cv2.putText(new_img, lvl, (table_x + 15, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, label_color, thick)
         
         for c in range(len(tubes)):
-            level_index = 5 - r
             val = tube_level_results[c][level_index]
             text_x = table_x + left_w + c*col_w + 20
-            cv2.putText(orig, str(val), (text_x, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), thick)
+            cv2.putText(new_img, str(val), (text_x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, label_color, thick)
 
     # Total row
     total_y = table_y + header_gap + (len(levels)+1)*row_h - 10
-    cv2.putText(orig, "Total", (table_x + 5, total_y+5),
+    cv2.putText(new_img, "Total", (table_x + 5, total_y+5),
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
     for c in range(len(tubes)):
-        cv2.putText(orig, str(level_totals[c]),
-                    (table_x + left_w + c*col_w + 13, total_y+5),
+        cv2.putText(new_img, str(level_totals[c]),
+                    (table_x + left_w + c*col_w + 20, total_y+5),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
-    # DRAW SCORE TABLE (เหมือนเดิม)
+    # =========================
+    # DRAW SCORE TABLE บน SIDEBAR
+    # =========================
     score_totals = []
     for c in range(len(tubes)):
         total = sum(tube_level_scores[c])
@@ -567,77 +563,90 @@ def process_image(img_path):
 
     score_table_y = table_y + table_h + 100
 
-    cv2.rectangle(orig, (table_x, score_table_y), 
-                  (table_x + 110, score_table_y-80),
-                  (0, 0, 0), -1)
-    cv2.rectangle(orig, 
-                  (table_x, score_table_y), 
-                  (table_x + 110, score_table_y-80),
-                  (255, 255, 255), 2)
-    cv2.putText(orig, "Score", (table_x + 5, score_table_y-50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), thick)
+    # Header box - Score
+    score_header_y = score_table_y - 110
+    cv2.rectangle(new_img, (table_x, score_header_y+150), 
+                  (table_x + table_w-260, score_header_y + 30),
+                  (0, 0, 0), -1)  # พื้นหลังน้ำเงินเข้ม
+    cv2.rectangle(new_img, 
+                  (table_x, score_header_y+150), 
+                  (table_x + table_w-260, score_header_y + 30),
+                  (255, 255, 255), 2)  # ขอบน้ำเงิน
+    cv2.putText(new_img, "Score", (table_x +13, score_header_y + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
-    cv2.rectangle(orig, (table_x, score_table_y-row_h),
+    # Score table background
+    cv2.rectangle(new_img, (table_x, score_table_y-row_h),
                   (table_x+table_w, score_table_y+table_h-25),
-                  (0,0,0), -1)
-    cv2.rectangle(orig, (table_x, score_table_y-row_h),
+                  (30, 30, 30), -1)
+    cv2.rectangle(new_img, (table_x, score_table_y-row_h),
                   (table_x+table_w, score_table_y+table_h-25),
-                  (255,255,255), 2)
+                  (200, 200, 200), 2)
 
-    cv2.line(orig, (table_x, score_table_y + header_gap), 
+    cv2.line(new_img, (table_x, score_table_y + header_gap), 
              (table_x+table_w, score_table_y + header_gap), 
-             (255,255,255), 1)
+             (200,200,200), 2)
 
     for r in range(len(levels)):
         y_line = score_table_y + header_gap + (r+1)*row_h
-        cv2.line(orig, (table_x, y_line), 
+        cv2.line(new_img, (table_x, y_line), 
                  (table_x+table_w, y_line), 
                  (100,100,100), 1)
 
     score_total_line_y = score_table_y + header_gap + (len(levels)+1)*row_h
-    cv2.line(orig, (table_x, score_total_line_y-row_h), 
+    cv2.line(new_img, (table_x, score_total_line_y-row_h), 
              (table_x+table_w, score_total_line_y-row_h), 
-             (255,255,255), 2)
+             (200,200,200), 2)
 
-    cv2.line(orig, (table_x+left_w, score_table_y-row_h), 
+    cv2.line(new_img, (table_x+left_w, score_table_y-row_h), 
              (table_x+left_w, score_table_y+table_h-25), 
-             (255,255,255), 1)
+             (200,200,200), 2)
 
     for c in range(1, len(tubes)):
         x_line = table_x + left_w + c*col_w
-        cv2.line(orig, (x_line, score_table_y-row_h), 
+        cv2.line(new_img, (x_line, score_table_y-row_h), 
                  (x_line, score_table_y+table_h-25), 
                  (100,100,100), 1)
         
     header_y = score_table_y - 10
-    cv2.putText(orig, "Tube", (table_x + 5, header_y),
+    cv2.putText(new_img, "Tube", (table_x + 5, header_y),
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
     for i, t in enumerate(tubes):
-        cv2.putText(orig, t,
+        cv2.putText(new_img, t,
                     (table_x + left_w + i*col_w + 15, header_y),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
     for r, lvl in enumerate(levels):
         y = score_table_y + header_gap + (r+1)*row_h - 10
-        cv2.putText(orig, lvl, (table_x + 15, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), thick)
+    
+        # กำหนดสีของ label ตาม LEVEL_COLORS
+        level_index = 5 - r
+        if level_index in LEVEL_COLORS:
+            label_color = LEVEL_COLORS[level_index]
+        else:
+            label_color = (255, 255, 255)  # L0 เป็นสีขาว
+        
+        cv2.putText(new_img, lvl, (table_x + 15, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, label_color, thick)
+        
         for c in range(len(tubes)):
             score_val = tube_level_scores[c][5-r]
-            cv2.putText(orig, str(score_val),
+            cv2.putText(new_img, str(score_val),
                         (table_x + left_w + c*col_w + 20, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), thick)
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, label_color, thick)
 
     score_total_y = score_table_y + header_gap + (len(levels)+1)*row_h - 10
-    cv2.putText(orig, "Total", (table_x + 5, score_total_y+5),
+    cv2.putText(new_img, "Total", (table_x + 5, score_total_y+5),
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
     for c in range(len(tubes)):
-        cv2.putText(orig, str(score_totals[c]),
-                    (table_x + left_w + c*col_w + 13, score_total_y+5),
+        cv2.putText(new_img, str(score_totals[c]),
+                    (table_x + left_w + c*col_w + 20, score_total_y+5),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
     
-    return orig, detection_vis
+    return new_img, detection_vis
+
 
 # =========================
 # FUNCTION: RESIZE IMAGE
@@ -700,17 +709,7 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         cv2.imshow("YOLO Fly Counter - Navigate with N/P/Q", display_img)
-        
-        # แสดงผล - ภาพแสดง crop areas
-        display_detection = resize_image(detection_img, 70)
-        
-        text_detection = f"Detection Areas - Showing crop regions with 30% overlap"
-        cv2.putText(display_detection, text_detection,
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        cv2.imshow("Crop Areas Visualization", display_detection)
-        
+ 
         # รอการกดปุ่ม
         while True:
             key = cv2.waitKey(0) & 0xFF
