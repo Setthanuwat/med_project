@@ -83,11 +83,11 @@ TUBE_CONFIGS = [
 
 # สีสำหรับ tube borders (BGR format) - สีสวยกว่าสีดำ
 colors = [
-    (255, 200, 100),  # Tube 1 - ฟ้าอ่อน
-    (255, 200, 100),  # Tube 2 - ฟ้าอ่อน
-    (255, 200, 100),  # Tube 3 - ฟ้าอ่อน
-    (255, 200, 100),  # Tube 4 - ฟ้าอ่อน
-    (255, 200, 100),  # Tube 5 - ฟ้าอ่อน
+    (0, 0, 0),  # Tube 1 - 
+    (0, 0, 0),  # Tube 2 - 
+    (0, 0, 0),  # Tube 3 - 
+    (0, 0, 0),  # Tube 4 -
+    (0, 0, 0),  # Tube 5 - 
 ]
 
 # =========================
@@ -924,6 +924,7 @@ def save_snapshot_with_gui(frame, timestamp, total_flies, fly_counts, level_resu
     print(f"💾 บันทึกภาพพร้อม GUI: {filename}")
     return filename
 
+
 # ========================= 
 # MAIN PROGRAM
 # ========================= 
@@ -931,7 +932,7 @@ def main():
     global waiting_for_5sec_capture, capture_5sec_time
     
     # เปิดกล้อง
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     
@@ -940,32 +941,20 @@ def main():
         return
     
     # เชื่อมต่อ ESP32
+    ser = None
     try:
         ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=1)
         time.sleep(2)
-        print(f"เชื่อมต่อ ESP32 ที่ {ESP32_PORT} สำเร็จ")
+        print(f"✓ เชื่อมต่อ ESP32 ที่ {ESP32_PORT} สำเร็จ")
         
         esp32_thread = threading.Thread(target=read_esp32, args=(ser, trigger_queue), daemon=True)
         esp32_thread.start()
     except Exception as e:
-        print(f"ไม่สามารถเชื่อมต่อ ESP32: {e}")
-        print("ทำงานต่อโดยไม่มี ESP32 (กด 't' เพื่อจำลองการถ่าย)")
+        print(f"✗ ไม่สามารถเชื่อมต่อ ESP32: {e}")
+        print("✓ ทำงานต่อโดยไม่มี ESP32 (กด 't' เพื่อจำลองการถ่าย)")
         ser = None
     
-    # สร้างไฟล์วิดีโอ
-    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    video_filename = f"{VIDEO_FOLDER}recording_{session_timestamp}.mp4"
-    
-    ret, frame = cap.read()
-    if not ret:
-        print("ไม่สามารถอ่าน frame จากกล้องได้")
-        return
-    
-    h, w = frame.shape[:2]
-    video_writer = cv2.VideoWriter(video_filename, VIDEO_CODEC, VIDEO_FPS, (w, h))
-    
     print(f"\n{'='*50}")
-    print(f"เริ่มบันทึกวิดีโอ: {video_filename}")
     print(f"โฟลเดอร์ภาพ: {SNAPSHOT_FOLDER}")
     print(f"{'='*50}")
     print("คำสั่ง:")
@@ -987,15 +976,13 @@ def main():
         frame_count += 1
         current_time = time.time()
         
-        # บันทึกวิดีโอธรรมดา (ไม่ประมวลผล)
-        video_writer.write(frame)
-        
-        # สร้าง display frame สำหรับแสดงผล
+        # สร้าง display frame สำหรับแสดงผล (ไม่บันทึกวิดีโอ)
         display_frame = frame.copy()
         
         # แสดงสถานะ
+        h, w = display_frame.shape[:2]
         status_color = (0, 255, 0)
-        status_text = "Recording..."
+        status_text = "Live Camera - Ready"
         
         # ตรวจสอบว่ากำลังรอครบ 5 วินาทีหรือไม่
         if waiting_for_5sec_capture:
@@ -1023,7 +1010,7 @@ def main():
                 save_snapshot_with_gui(processed_frame, timestamp_5sec, total_flies, fly_counts, 
                                       level_results, level_scores, snapshot_type=f"5sec_{snapshot_count:03d}")
                 
-                print(f"บันทึกภาพที่วินาทีที่ 5 เรียบร้อย")
+                print(f"✓ บันทึกภาพที่วินาทีที่ 5 เรียบร้อย")
                 print(f"{'='*50}\n")
                 
                 # รีเซ็ตสถานะ
@@ -1066,8 +1053,14 @@ def main():
                     print(">>> ไม่มีแมลง - ไม่แคปภาพเพิ่ม")
                 else:
                     print(">>> มีแมลงอยู่เหนือเส้น L1 - ไม่แคปภาพเพิ่ม")
-                    waiting_for_5sec_capture = True
-                    capture_5sec_time = current_time
+                
+                # ส่งสัญญาณกลับไป ESP32 ให้เคาะแมลงวัน
+                if ser:
+                    try:
+                        ser.write(b'TAP\n')
+                        print(">>> ส่งสัญญาณ 'TAP' ไปยัง ESP32 เพื่อเคาะแมลงวัน!")
+                    except Exception as e:
+                        print(f"Error sending TAP command: {e}")
             
             print(f"{'='*50}\n")
         
@@ -1090,7 +1083,7 @@ def main():
         height = int(display_frame.shape[0] * scale_percent / 100)
         resized = cv2.resize(display_frame, (width, height))
         
-        cv2.imshow("Fly Counter - Recording", resized)
+        cv2.imshow("Fly Counter - Live Camera", resized)
         
         # ควบคุมด้วยคีย์บอร์ด
         key = cv2.waitKey(1) & 0xFF
@@ -1103,15 +1096,14 @@ def main():
     
     # ปิดทุกอย่าง
     print("\nกำลังปิดโปรแกรม...")
-    video_writer.release()
     cap.release()
     cv2.destroyAllWindows()
     if ser:
         ser.close()
     
     print(f"\n{'='*50}")
-    print(f"บันทึกวิดีโอเรียบร้อย: {video_filename}")
-    print(f"จำนวน frames ทั้งหมด: {frame_count}")
+    print(f"สรุป:")
+    print(f"จำนวน frames ที่แสดง: {frame_count}")
     print(f"จำนวนภาพที่บันทึก: {snapshot_count}")
     print(f"โฟลเดอร์ภาพ: {SNAPSHOT_FOLDER}")
     print(f"{'='*50}")
