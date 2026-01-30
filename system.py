@@ -952,7 +952,7 @@ def mouse_callback(event, x, y, flags, param):
                 print("="*60)
                 is_running = False
                 emergency_stop = True
-                send_esp32_command(ser, 'motor_stop')
+                send_esp32_command(ser, 'emergency_stop')
 
 # ========================= 
 # MAIN PROGRAM
