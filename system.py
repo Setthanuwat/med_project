@@ -13,7 +13,6 @@ from ultralytics import YOLO
 # ========================= 
 ESP32_PORT = 'COM3'
 ESP32_BAUDRATE = 115200
-TRIGGER_COMMAND = 'CAPTURE'
 
 # ========================= 
 # VIDEO & SNAPSHOT CONFIG
@@ -81,13 +80,13 @@ TUBE_CONFIGS = [
     {'offset_from_left': 1375, 'width': 215, 'top_offset': 40, 'bottom_offset': 3},
 ]
 
-# สีสำหรับ tube borders (BGR format) - สีสวยกว่าสีดำ
+# สีสำหรับ tube borders (BGR format)
 colors = [
-    (0, 0, 0),  # Tube 1 - 
-    (0, 0, 0),  # Tube 2 - 
-    (0, 0, 0),  # Tube 3 - 
-    (0, 0, 0),  # Tube 4 -
-    (0, 0, 0),  # Tube 5 - 
+    (0, 0, 0),  # Tube 1
+    (0, 0, 0),  # Tube 2
+    (0, 0, 0),  # Tube 3
+    (0, 0, 0),  # Tube 4
+    (0, 0, 0),  # Tube 5
 ]
 
 # =========================
@@ -97,12 +96,20 @@ SIDEBAR_WIDTH = 400
 SIDEBAR_COLOR = (210, 210, 210)  # สีเทาเข้ม
 
 # =========================
+# BUTTON CONFIG
+# =========================
+BUTTON_WIDTH = 340
+BUTTON_HEIGHT = 60
+BUTTON_MARGIN = 20
+BUTTON_START_Y = 700
+
+# =========================
 # YOLO CONFIG
 # =========================
-YOLO_MODEL_PATH = 'yolo26n_v2.pt'  # path ไปยัง trained model
-YOLO_CONF_THRESHOLD = 0.65  # confidence threshold
-YOLO_INPUT_SIZE = 640  # ขนาด input ของ YOLO
-OVERLAP_PERCENT = 0.5  # overlap 50%
+YOLO_MODEL_PATH = 'yolo26n_v2.pt'
+YOLO_CONF_THRESHOLD = 0.65
+YOLO_INPUT_SIZE = 640
+OVERLAP_PERCENT = 0.5
 
 # =========================
 # LOAD YOLO MODEL
@@ -118,28 +125,28 @@ except Exception as e:
 # ========================= 
 # GLOBAL VARIABLES
 # ========================= 
-trigger_queue = queue.Queue()
+is_running = False
+emergency_stop = False
 waiting_for_5sec_capture = False
 capture_5sec_time = 0
-WAIT_DURATION = 5  # รอ 5 วินาทีหลังจากได้สัญญาณแรก
+WAIT_DURATION = 5
 
 # ========================= 
-# ESP32 SERIAL READER THREAD
+# ESP32 SERIAL HANDLER
 # ========================= 
-def read_esp32(ser, trigger_queue):
-    """อ่านข้อมูลจาก ESP32 ในเธรดแยก"""
-    print("เริ่มอ่านข้อมูลจาก ESP32...")
-    while True:
+def send_esp32_command(ser, command):
+    """ส่งคำสั่งไปยัง ESP32"""
+    if ser:
         try:
-            if ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').strip()
-                print(f"ESP32: {line}")
-                if TRIGGER_COMMAND in line:
-                    trigger_queue.put(True)
-                    print(">>> ได้รับสัญญาณถ่ายภาพจาก ESP32!")
+            ser.write(f'{command}\n'.encode())
+            print(f">>> ส่งคำสั่ง '{command}' ไปยัง ESP32")
+            return True
         except Exception as e:
-            print(f"Error reading ESP32: {e}")
-            time.sleep(0.1)
+            print(f"Error sending command to ESP32: {e}")
+            return False
+    else:
+        print(f">>> [จำลอง] ส่งคำสั่ง '{command}' ไปยัง ESP32")
+        return True
 
 # =========================
 # YOLO HELPER FUNCTIONS
@@ -148,22 +155,17 @@ def create_level_crops(tube_roi, tube_y_start, x_start):
     """แบ่ง tube เป็น crops ตาม levels โดยมี overlap"""
     h, w = tube_roi.shape[:2]
     
-    # ตรวจสอบว่า tube_roi ไม่ว่าง
     if h == 0 or w == 0:
         return []
     
-    # คำนวณตำแหน่ง level เหมือนกับใน process_frame
-    LEVEL_Y_DRAW = [y - 50 for y in LEVEL_Y_POSITIONS]  # ตำแหน่งจริงในภาพ
+    LEVEL_Y_DRAW = [y - 50 for y in LEVEL_Y_POSITIONS]
     
-    # แปลงเป็น relative position ใน tube ROI
     LEVEL_Y_IN_TUBE = []
     for y in LEVEL_Y_DRAW:
         y_relative = y - tube_y_start
-        # เก็บเฉพาะที่อยู่ใน tube
         if 0 < y_relative < h:
             LEVEL_Y_IN_TUBE.append(int(y_relative))
     
-    # ถ้าไม่มี level ใน tube ให้ใช้ whole tube
     if len(LEVEL_Y_IN_TUBE) == 0:
         crop_img = tube_roi.copy()
         if crop_img.size > 0:
@@ -178,7 +180,6 @@ def create_level_crops(tube_roi, tube_y_start, x_start):
         else:
             return []
     
-    # เพิ่ม boundary ที่ top และ bottom
     boundaries = [0] + LEVEL_Y_IN_TUBE + [h]
     
     crops = []
@@ -187,34 +188,26 @@ def create_level_crops(tube_roi, tube_y_start, x_start):
         y_start = int(boundaries[i])
         y_end = int(boundaries[i + 1])
         
-        # ตรวจสอบขนาด
         if y_end <= y_start:
             continue
         
-        # คำนวณ overlap
         crop_height = y_end - y_start
         overlap_pixels = int(crop_height * OVERLAP_PERCENT)
         
-        # ขยาย crop ขึ้นและลง
         crop_y_start = max(0, y_start - overlap_pixels)
         crop_y_end = min(h, y_end + overlap_pixels)
         
-        # ตรวจสอบอีกครั้งหลัง overlap
         if crop_y_end <= crop_y_start:
             continue
         
-        # ตรวจสอบว่าขนาดมากพอ (อย่างน้อย 10 pixels)
         if (crop_y_end - crop_y_start) < 10:
             continue
         
-        # crop ภาพ
         crop_img = tube_roi[crop_y_start:crop_y_end, :].copy()
         
-        # ตรวจสอบว่า crop มีขนาดจริง
         if crop_img.size == 0 or crop_img.shape[0] == 0 or crop_img.shape[1] == 0:
             continue
         
-        # ระบุ level
         level_num = len(boundaries) - 2 - i
         
         crops.append({
@@ -242,7 +235,6 @@ def resize_to_yolo_input(img, target_size=640):
     new_w = int(w * scale)
     new_h = int(h * scale)
     
-    # ป้องกันขนาด 0
     if new_w == 0 or new_h == 0:
         return None, None, None, None
     
@@ -266,15 +258,13 @@ def detect_flies_yolo(crop_info, conf_threshold=0.25):
     if crop_img is None or crop_img.size == 0:
         return []
     
-    # Resize to YOLO input
     result = resize_to_yolo_input(crop_img, YOLO_INPUT_SIZE)
     
-    if result[0] is None:  # ถ้า resize ไม่สำเร็จ
+    if result[0] is None:
         return []
     
     yolo_input, scale, x_offset, y_offset = result
     
-    # Run YOLO detection
     results = yolo_model(yolo_input, conf=conf_threshold, verbose=False)
     
     detections = []
@@ -285,7 +275,6 @@ def detect_flies_yolo(crop_info, conf_threshold=0.25):
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
             conf = box.conf[0].cpu().numpy()
             
-            # แปลงกลับไปยัง crop coordinate
             x1_orig = int((x1 - x_offset) / scale)
             y1_orig = int((y1 - y_offset) / scale)
             x2_orig = int((x2 - x_offset) / scale)
@@ -338,14 +327,13 @@ def remove_duplicates(all_detections, iou_threshold=0.5):
     return filtered
 
 # ========================= 
-# PROCESS FRAME FUNCTION
+# PROCESS FRAME FUNCTION (OpenCV Only)
 # ========================= 
 def process_frame(img):
-    """ประมวลผลภาพและคืนค่าภาพที่วาดแล้ว + ข้อมูล"""
+    """ประมวลผลภาพด้วย OpenCV เท่านั้น"""
     orig = img.copy()
     h_img, w_img = img.shape[:2]
     
-    # WHITE MASK
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lower_white = np.array([0, 0, 160])
     upper_white = np.array([180, 50, 255])
@@ -353,11 +341,9 @@ def process_frame(img):
     kernel_white = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
     white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel_white)
     
-    # BASELINE DETECTION
     roi_y_start = 0
     roi_y_end = 1000
     
-    # TUBE POSITIONS
     tube_positions = []
     for i, cfg in enumerate(TUBE_CONFIGS):
         x_start = cfg['offset_from_left']
@@ -368,7 +354,6 @@ def process_frame(img):
             'x_end': x_end
         })
     
-    # ANALYZE EACH TUBE
     fly_counts = []
     tube_level_results = []
     tube_level_scores = []
@@ -386,12 +371,10 @@ def process_frame(img):
         level_counts = [0] * LEVEL_COUNT
         tube_fly_count = 0
         
-        # draw tube
         cv2.rectangle(orig, (x_start, tube_y_start), (x_end, tube_y_end), colors[i], 2)
         cv2.putText(orig, f"Tube {i+1}", (x_start + 50, tube_y_start - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, colors[i], 2)
         
-        # extract ROI
         tube_roi = img[tube_y_start:tube_y_end, x_start:x_end]
         
         if tube_roi.size > 0:
@@ -417,18 +400,14 @@ def process_frame(img):
                     actual_x = x_start + fx
                     actual_y = tube_y_start + fy
                     
-                    # draw fly
                     cv2.rectangle(orig, (actual_x, actual_y),
                                 (actual_x + fw, actual_y + fh), (0, 0, 255), 1)
                     
-                    # LEVEL CALC
                     cy = actual_y + fh // 2
                     
-                    # นับแมลงที่อยู่เหนือ L1
                     if cy < LEVEL_Y_DRAW[4]:
                         flies_above_L1 += 1
                     
-                    # หาว่าแมลงอยู่ระหว่างเส้นไหน
                     assigned = False
                     for lv_idx in range(len(LEVEL_Y_DRAW)):
                         if cy < LEVEL_Y_DRAW[lv_idx]:
@@ -439,19 +418,17 @@ def process_frame(img):
                     if not assigned:
                         level_counts[0] += 1
         
-        # เพิ่มแมลงที่ไม่เห็นให้กับ L5 (ถ้ามีการตั้งค่า)
         total_expected = TOTAL_FLIES_PER_TUBE[i] if i < len(TOTAL_FLIES_PER_TUBE) else 0
         if total_expected > 0 and tube_fly_count < total_expected:
             unseen_flies = total_expected - tube_fly_count
             level_counts[5] += unseen_flies
         
-        # draw level lines
         for lv_idx, y_draw in enumerate(LEVEL_Y_DRAW):
             display_level = 5 - lv_idx
             cv2.line(orig, (x_start, y_draw), (x_end, y_draw),
                     LEVEL_COLORS[display_level], LEVEL_THICKNESS)
             
-            if i == 4:  # หลอดที่ 5
+            if i == 4:
                 label_text = f"L{display_level}"
                 label_x = x_end + 15
                 label_y = y_draw - 55
@@ -463,23 +440,21 @@ def process_frame(img):
         fly_counts.append(total_expected if total_expected > 0 else tube_fly_count)
         tube_level_results.append(level_counts)
         
-        # SCORE CALC
         score_per_level = []
         for lv in range(LEVEL_COUNT):
             score_per_level.append(level_counts[lv] * LEVEL_SCORES[lv])
         tube_level_scores.append(score_per_level)
     
-    # SUMMARY
     total_flies = sum(fly_counts)
     all_flies_below_L1 = (total_flies > 0) and (flies_above_L1 == 0)
     
     return orig, all_flies_below_L1, total_flies, fly_counts, tube_level_results, tube_level_scores
 
 # =========================
-# PROCESS FRAME WITH YOLO (สำหรับภาพวินาทีที่ 5)
+# PROCESS FRAME WITH YOLO
 # =========================
 def process_frame_with_yolo(img):
-    """ประมวลผลภาพด้วยทั้ง OpenCV และ YOLO แล้วรวมผล"""
+    """ประมวลผลภาพด้วยทั้ง OpenCV และ YOLO"""
     orig = img.copy()
     h_img, w_img = img.shape[:2]
     
@@ -487,11 +462,9 @@ def process_frame_with_yolo(img):
     print("PROCESSING WITH DUAL ALGORITHM (OpenCV + YOLO)")
     print("="*60)
     
-    # BASELINE DETECTION
     roi_y_start = 0
     roi_y_end = 1000
     
-    # TUBE POSITIONS
     tube_positions = []
     for i, cfg in enumerate(TUBE_CONFIGS):
         x_start = cfg['offset_from_left']
@@ -502,7 +475,6 @@ def process_frame_with_yolo(img):
             'x_end': x_end
         })
     
-    # เก็บผลลัพธ์แยกจาก 2 วิธี
     opencv_results = []
     yolo_results = []
     combined_results = []
@@ -523,15 +495,13 @@ def process_frame_with_yolo(img):
         
         print(f"\n--- Tube {i+1} ---")
         
-        # draw tube
         cv2.rectangle(orig, (x_start, tube_y_start), (x_end, tube_y_end), colors[i], 2)
         cv2.putText(orig, f"Tube {i+1}", (x_start + 50, tube_y_start - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, colors[i], 2)
         
-        # extract ROI
         tube_roi = img[tube_y_start:tube_y_end, x_start:x_end]
         
-        # ===== METHOD 1: OpenCV Threshold =====
+        # OpenCV
         opencv_detections = []
         if tube_roi.size > 0:
             gray_roi = cv2.cvtColor(tube_roi, cv2.COLOR_BGR2GRAY)
@@ -562,7 +532,7 @@ def process_frame_with_yolo(img):
         
         print(f"  OpenCV detected: {len(opencv_detections)} flies")
         
-        # ===== METHOD 2: YOLO =====
+        # YOLO
         yolo_detections = []
         if yolo_model is not None and tube_roi.size > 0:
             crops = create_level_crops(tube_roi, tube_y_start, x_start)
@@ -599,22 +569,18 @@ def process_frame_with_yolo(img):
             
             print(f"  YOLO detected: {len(yolo_detections)} flies")
         
-        # ===== COMBINE RESULTS =====
-        # รวม detections จากทั้ง 2 วิธี
+        # COMBINE
         all_detections = opencv_detections + yolo_detections
         
-        # วาดกรอบ: สีแดงทั้งหมด ไม่แสดงค่าความมั่นใจ
         level_counts = [0] * LEVEL_COUNT
         
         for det in all_detections:
-            # ใช้สีแดงเหมือนกันทั้งหมด
-            color = (0, 0, 255)  # แดง
+            color = (0, 0, 255)
             thickness = 1
             
             cv2.rectangle(orig, (det['x'], det['y']),
                         (det['x'] + det['w'], det['y'] + det['h']), color, thickness)
             
-            # คำนวณ level
             cy = det['y'] + det['h'] // 2
             
             if cy < LEVEL_Y_DRAW[4]:
@@ -633,14 +599,12 @@ def process_frame_with_yolo(img):
         tube_fly_count = len(all_detections)
         print(f"  Combined total: {tube_fly_count} flies")
         
-        # เพิ่มแมลงที่ไม่เห็น
         total_expected = TOTAL_FLIES_PER_TUBE[i] if i < len(TOTAL_FLIES_PER_TUBE) else 0
         if total_expected > 0 and tube_fly_count < total_expected:
             unseen_flies = total_expected - tube_fly_count
             level_counts[5] += unseen_flies
             print(f"  Added {unseen_flies} unseen flies to L5")
         
-        # draw level lines
         for lv_idx, y_draw in enumerate(LEVEL_Y_DRAW):
             display_level = 5 - lv_idx
             cv2.line(orig, (x_start, y_draw), (x_end, y_draw),
@@ -657,7 +621,6 @@ def process_frame_with_yolo(img):
         fly_counts.append(total_expected if total_expected > 0 else tube_fly_count)
         tube_level_results.append(level_counts)
         
-        # SCORE CALC
         score_per_level = []
         for lv in range(LEVEL_COUNT):
             score_per_level.append(level_counts[lv] * LEVEL_SCORES[lv])
@@ -667,7 +630,6 @@ def process_frame_with_yolo(img):
         yolo_results.append(len(yolo_detections))
         combined_results.append(tube_fly_count)
     
-    # SUMMARY
     total_flies = sum(fly_counts)
     all_flies_below_L1 = (total_flies > 0) and (flies_above_L1 == 0)
     
@@ -689,28 +651,21 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
     """สร้าง GUI พร้อม Sidebar"""
     h_orig, w_orig = orig.shape[:2]
     
-    # หาขอบเขตของหลอดทดลอง
     min_x = min([cfg['offset_from_left'] for cfg in TUBE_CONFIGS]) - 50
     max_x = max([cfg['offset_from_left'] + cfg['width'] for cfg in TUBE_CONFIGS]) + 100
     roi_y_start = 0
     roi_y_end = 1000
     
-    # ตัดเฉพาะส่วน ROI ที่มีหลอด
     cropped_orig = orig[roi_y_start:roi_y_end, min_x:max_x]
     h_crop, w_crop = cropped_orig.shape[:2]
     
-    # สร้างภาพใหม่พร้อม sidebar (พื้นหลังสีขาว)
     new_img = np.ones((h_crop, w_crop + SIDEBAR_WIDTH, 3), dtype=np.uint8) * 255
     
-    # วาง sidebar
     new_img[:, :SIDEBAR_WIDTH] = SIDEBAR_COLOR
     
-    # วางภาพที่ตัดแล้ว
     new_img[:h_crop, SIDEBAR_WIDTH:SIDEBAR_WIDTH+w_crop] = cropped_orig
     
-    # =========================
-    # DRAW TABLE บน SIDEBAR
-    # =========================
+    # TABLE
     table_x = 20
     table_y = 140
     row_h = 35
@@ -731,7 +686,7 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
     table_w = left_w + col_w * len(tubes)
     table_h = row_h * (len(levels) + 2) + header_gap
     
-    # Header box - Drosophila No.
+    # Header box
     header_box_y = 30
     header_box_h = 80
     cv2.rectangle(new_img, (table_x, header_box_y+30), 
@@ -752,7 +707,6 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
                   (table_x+table_w, table_y+table_h-25),
                   (200, 200, 200), 2)
 
-    # Horizontal lines
     cv2.line(new_img, (table_x, table_y + header_gap), 
              (table_x+table_w, table_y + header_gap), 
              (200,200,200), 2)
@@ -768,7 +722,6 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
              (table_x+table_w, total_line_y-row_h), 
              (200,200,200), 2)
 
-    # Vertical lines
     cv2.line(new_img, (table_x+left_w, table_y-row_h), 
              (table_x+left_w, table_y+table_h-25), 
              (200,200,200), 2)
@@ -818,9 +771,7 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
                     (table_x + left_w + c*col_w + 20, total_y+5),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,255,255), thick)
 
-    # =========================
-    # DRAW SCORE TABLE
-    # =========================
+    # SCORE TABLE
     score_totals = []
     for c in range(len(tubes)):
         total = sum(tube_level_scores[c])
@@ -828,7 +779,6 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
 
     score_table_y = table_y + table_h + 100
 
-    # Header box - Score
     score_header_y = score_table_y - 110
     cv2.rectangle(new_img, (table_x, score_header_y+150), 
                   (table_x + table_w-260, score_header_y + 30),
@@ -840,7 +790,6 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
     cv2.putText(new_img, "Score", (table_x +13, score_header_y + 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
-    # Score table background
     cv2.rectangle(new_img, (table_x, score_table_y-row_h),
                   (table_x+table_w, score_table_y+table_h-25),
                   (30, 30, 30), -1)
@@ -911,12 +860,59 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
     
     return new_img
 
+# =========================
+# DRAW BUTTONS ON SIDEBAR
+# =========================
+def draw_buttons(sidebar_img, is_running):
+    """วาดปุ่ม Start และ Emergency Stop บน sidebar"""
+    button_x = BUTTON_MARGIN
+    
+    # Start Button
+    start_y = BUTTON_START_Y
+    start_color = (100, 200, 100) if not is_running else (150, 150, 150)
+    cv2.rectangle(sidebar_img, 
+                  (button_x, start_y), 
+                  (button_x + BUTTON_WIDTH, start_y + BUTTON_HEIGHT),
+                  start_color, -1)
+    cv2.rectangle(sidebar_img, 
+                  (button_x, start_y), 
+                  (button_x + BUTTON_WIDTH, start_y + BUTTON_HEIGHT),
+                  (0, 0, 0), 3)
+    
+    text = "START" if not is_running else "RUNNING..."
+    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+    text_x = button_x + (BUTTON_WIDTH - text_size[0]) // 2
+    text_y = start_y + (BUTTON_HEIGHT + text_size[1]) // 2
+    cv2.putText(sidebar_img, text, (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+    
+    # Emergency Stop Button
+    stop_y = start_y + BUTTON_HEIGHT + BUTTON_MARGIN
+    stop_color = (50, 50, 200)
+    cv2.rectangle(sidebar_img, 
+                  (button_x, stop_y), 
+                  (button_x + BUTTON_WIDTH, stop_y + BUTTON_HEIGHT),
+                  stop_color, -1)
+    cv2.rectangle(sidebar_img, 
+                  (button_x, stop_y), 
+                  (button_x + BUTTON_WIDTH, stop_y + BUTTON_HEIGHT),
+                  (0, 0, 0), 3)
+    
+    text = "EMERGENCY STOP"
+    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+    text_x = button_x + (BUTTON_WIDTH - text_size[0]) // 2
+    text_y = stop_y + (BUTTON_HEIGHT + text_size[1]) // 2
+    cv2.putText(sidebar_img, text, (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    
+    return sidebar_img, (button_x, start_y, BUTTON_WIDTH, BUTTON_HEIGHT), \
+           (button_x, stop_y, BUTTON_WIDTH, BUTTON_HEIGHT)
+
 # ========================= 
 # SAVE SNAPSHOT FUNCTION
 # ========================= 
-def save_snapshot_with_gui(frame, timestamp, total_flies, fly_counts, level_results, level_scores, snapshot_type="trigger"):
+def save_snapshot_with_gui(frame, timestamp, total_flies, fly_counts, level_results, level_scores, snapshot_type="capture"):
     """บันทึกภาพพร้อม GUI"""
-    # สร้าง GUI frame
     gui_frame = create_gui_frame(frame, fly_counts, level_results, level_scores)
     
     filename = f"{SNAPSHOT_FOLDER}{snapshot_type}_{timestamp}_flies{total_flies}.jpg"
@@ -924,12 +920,45 @@ def save_snapshot_with_gui(frame, timestamp, total_flies, fly_counts, level_resu
     print(f"💾 บันทึกภาพพร้อม GUI: {filename}")
     return filename
 
+# =========================
+# MOUSE CALLBACK
+# =========================
+def mouse_callback(event, x, y, flags, param):
+    """จัดการคลิกเมาส์บนปุ่ม"""
+    global is_running, emergency_stop
+    
+    if event == cv2.EVENT_LBUTTONDOWN:
+        start_btn, stop_btn, ser = param
+        
+        # ไม่ต้องปรับ coordinates เพราะแสดงขนาดเต็ม
+        
+        # ตรวจสอบว่าคลิกที่ Start Button หรือไม่
+        if (start_btn[0] <= x <= start_btn[0] + start_btn[2] and
+            start_btn[1] <= y <= start_btn[1] + start_btn[3]):
+            if not is_running:
+                print("\n" + "="*60)
+                print(">>> กดปุ่ม START - เริ่มประมวลผล")
+                print("="*60)
+                is_running = True
+                emergency_stop = False
+                send_esp32_command(ser, 'motor_start')
+        
+        # ตรวจสอบว่าคลิกที่ Emergency Stop Button หรือไม่
+        elif (stop_btn[0] <= x <= stop_btn[0] + stop_btn[2] and
+              stop_btn[1] <= y <= stop_btn[1] + stop_btn[3]):
+            if is_running:
+                print("\n" + "="*60)
+                print(">>> กดปุ่ม EMERGENCY STOP - หยุดฉุกเฉิน")
+                print("="*60)
+                is_running = False
+                emergency_stop = True
+                send_esp32_command(ser, 'motor_stop')
 
 # ========================= 
 # MAIN PROGRAM
 # ========================= 
 def main():
-    global waiting_for_5sec_capture, capture_5sec_time
+    global is_running, emergency_stop, waiting_for_5sec_capture, capture_5sec_time
     
     # เปิดกล้อง
     cap = cv2.VideoCapture(1)
@@ -946,26 +975,27 @@ def main():
         ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=1)
         time.sleep(2)
         print(f"✓ เชื่อมต่อ ESP32 ที่ {ESP32_PORT} สำเร็จ")
-        
-        esp32_thread = threading.Thread(target=read_esp32, args=(ser, trigger_queue), daemon=True)
-        esp32_thread.start()
     except Exception as e:
         print(f"✗ ไม่สามารถเชื่อมต่อ ESP32: {e}")
-        print("✓ ทำงานต่อโดยไม่มี ESP32 (กด 't' เพื่อจำลองการถ่าย)")
+        print("✓ ทำงานต่อโดยไม่มี ESP32")
         ser = None
     
     print(f"\n{'='*50}")
     print(f"โฟลเดอร์ภาพ: {SNAPSHOT_FOLDER}")
     print(f"{'='*50}")
     print("คำสั่ง:")
-    print("  - กด 'q' เพื่อออก")
-    print("  - กด 't' เพื่อจำลองสัญญาณถ่ายภาพ (ถ้าไม่มี ESP32)")
-    print("  - ESP32 ส่ง 'CAPTURE' เพื่อเริ่มถ่าย")
+    print("  - คลิกปุ่ม START เพื่อเริ่มประมวลผล")
+    print("  - คลิกปุ่ม EMERGENCY STOP เพื่อหยุดฉุกเฉิน")
+    print("  - กดปุ่มขยายหน้าต่างมุมขวาบนเพื่อขยายเต็มจอ")
+    print("  - กด 'q' เพื่อออกจากโปรแกรม")
     print(f"{'='*50}\n")
     
     frame_count = 0
     snapshot_count = 0
-    last_trigger_info = None
+    last_check_result = None
+    
+    # สร้างหน้าต่างและ set mouse callback
+    cv2.namedWindow("Fly Counter - Auto Mode", cv2.WINDOW_NORMAL)
     
     while True:
         ret, frame = cap.read()
@@ -976,126 +1006,129 @@ def main():
         frame_count += 1
         current_time = time.time()
         
-        # สร้าง display frame สำหรับแสดงผล (ไม่บันทึกวิดีโอ)
+        # สร้าง display frame
         display_frame = frame.copy()
+        h, w = display_frame.shape[:2]
+        
+        # ถ้ากำลัง running จะประมวลผลด้วย OpenCV
+        if is_running and not emergency_stop:
+            # ประมวลผล
+            processed_frame, all_below_L1, total_flies, fly_counts, level_results, level_scores = process_frame(frame)
+            display_frame = processed_frame
+            
+            # ตรวจสอบสถานะแมลงวัน
+            if not waiting_for_5sec_capture:
+                # ตรวจสอบว่าแมลงอยู่ใต้ L1 หรือยัง
+                if all_below_L1 and total_flies > 0:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] >>> แมลงทั้งหมดอยู่ใต้เส้น L1 - เริ่มนับ 5 วินาที")
+                    waiting_for_5sec_capture = True
+                    capture_5sec_time = current_time
+                    send_esp32_command(ser, 'motor_stop')
+                else:
+                    # แมลงยังไม่ลงครบ - ส่งสัญญาณ motor_start ต่อเนื่อง
+                    if frame_count % 30 == 0:  # ทุก 30 frames
+                        send_esp32_command(ser, 'motor_start')
+                    
+                    last_check_result = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'total_flies': total_flies,
+                        'all_below_L1': all_below_L1,
+                        'status': 'Waiting for flies to settle...'
+                    }
+            else:
+                # กำลังรอครบ 5 วินาที
+                elapsed = current_time - capture_5sec_time
+                remaining = WAIT_DURATION - elapsed
+                
+                if remaining > 0:
+                    last_check_result = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'total_flies': total_flies,
+                        'all_below_L1': all_below_L1,
+                        'status': f'Waiting for 5s capture: {remaining:.1f}s'
+                    }
+                else:
+                    # ครบ 5 วินาที - แคปภาพด้วย DUAL ALGORITHM
+                    print(f"\n{'='*50}")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ครบ 5 วินาที - แคปและประมวลผลด้วย DUAL ALGORITHM...")
+                    
+                    processed_frame_yolo, all_below_L1_final, total_flies_final, fly_counts_final, \
+                    level_results_final, level_scores_final = process_frame_with_yolo(frame)
+                    
+                    print(f"Total flies: {total_flies_final}")
+                    print(f"Flies per tube: {fly_counts_final}")
+                    
+                    # บันทึกภาพ
+                    timestamp_5sec = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    snapshot_count += 1
+                    save_snapshot_with_gui(processed_frame_yolo, timestamp_5sec, total_flies_final, 
+                                          fly_counts_final, level_results_final, level_scores_final, 
+                                          snapshot_type=f"final_{snapshot_count:03d}")
+                    
+                    print(f"✓ บันทึกภาพที่วินาทีที่ 5 เรียบร้อย")
+                    print(f"{'='*50}\n")
+                    
+                    # รีเซ็ตสถานะและหยุด
+                    waiting_for_5sec_capture = False
+                    is_running = False
+                    last_check_result = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'total_flies': total_flies_final,
+                        'all_below_L1': True,
+                        'status': 'Complete - Ready for next run'
+                    }
+        
+        # สร้าง GUI frame พร้อมปุ่ม
+        min_x = min([cfg['offset_from_left'] for cfg in TUBE_CONFIGS]) - 50
+        max_x = max([cfg['offset_from_left'] + cfg['width'] for cfg in TUBE_CONFIGS]) + 100
+        roi_y_start = 0
+        roi_y_end = 1000
+        
+        cropped_display = display_frame[roi_y_start:roi_y_end, min_x:max_x]
+        h_crop, w_crop = cropped_display.shape[:2]
+        
+        gui_img = np.ones((h_crop, w_crop + SIDEBAR_WIDTH, 3), dtype=np.uint8) * 255
+        gui_img[:, :SIDEBAR_WIDTH] = SIDEBAR_COLOR
+        gui_img[:h_crop, SIDEBAR_WIDTH:SIDEBAR_WIDTH+w_crop] = cropped_display
+        
+        # วาดปุ่ม
+        gui_img, start_btn_rect, stop_btn_rect = draw_buttons(gui_img, is_running)
         
         # แสดงสถานะ
-        h, w = display_frame.shape[:2]
-        status_color = (0, 255, 0)
-        status_text = "Live Camera - Ready"
+        if last_check_result:
+            status_y = 50
+            cv2.putText(gui_img, f"Status: {last_check_result['status']}", 
+                       (20, status_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            cv2.putText(gui_img, f"Last Check: {last_check_result['time']}", 
+                       (20, status_y + 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+            # cv2.putText(gui_img, f"Total Flies: {last_check_result['total_flies']}", 
+            #            (20, status_y + 55),
+            #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         
-        # ตรวจสอบว่ากำลังรอครบ 5 วินาทีหรือไม่
-        if waiting_for_5sec_capture:
-            elapsed = current_time - capture_5sec_time
-            remaining = WAIT_DURATION - elapsed
-            
-            if remaining > 0:
-                # แสดงการนับถอยหลัง
-                status_color = (0, 165, 255)
-                status_text = f"Waiting for 5s capture: {remaining:.1f}s"
-            else:
-                # ครบ 5 วินาที - แคปภาพและประมวลผล
-                print(f"\n{'='*50}")
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ครบ 5 วินาที - กำลังแคปและประมวลผลด้วย DUAL ALGORITHM...")
-                
-                # ประมวลผล frame ปัจจุบันด้วยทั้ง OpenCV และ YOLO
-                processed_frame, all_below_L1, total_flies, fly_counts, level_results, level_scores = process_frame_with_yolo(frame)
-                
-                print(f"Total flies: {total_flies}")
-                print(f"Flies per tube: {fly_counts}")
-                
-                # บันทึกภาพพร้อม GUI
-                timestamp_5sec = datetime.now().strftime("%Y%m%d_%H%M%S")
-                snapshot_count += 1
-                save_snapshot_with_gui(processed_frame, timestamp_5sec, total_flies, fly_counts, 
-                                      level_results, level_scores, snapshot_type=f"5sec_{snapshot_count:03d}")
-                
-                print(f"✓ บันทึกภาพที่วินาทีที่ 5 เรียบร้อย")
-                print(f"{'='*50}\n")
-                
-                # รีเซ็ตสถานะ
-                waiting_for_5sec_capture = False
+        cv2.putText(gui_img, f"Snapshots: {snapshot_count}", 
+                   (20, h_crop - 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         
-        # ตรวจสอบสัญญาณจาก ESP32
-        if not trigger_queue.empty():
-            trigger_queue.get()
-            trigger_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            print(f"\n{'='*50}")
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ได้รับสัญญาณถ่าย! กำลังประมวลผล...")
-            
-            # ประมวลผล frame ปัจจุบัน
-            processed_frame, all_below_L1, total_flies, fly_counts, level_results, level_scores = process_frame(frame)
-            
-            print(f"Total flies: {total_flies}")
-            print(f"Flies per tube: {fly_counts}")
-            print(f"All flies below L1: {all_below_L1}")
-            
-            # บันทึกภาพพร้อม GUI
-            snapshot_count += 1
-            save_snapshot_with_gui(processed_frame, trigger_timestamp, total_flies, fly_counts, 
-                                  level_results, level_scores, snapshot_type=f"trigger_{snapshot_count:03d}")
-            
-            # เก็บข้อมูลสำหรับแสดงผล
-            last_trigger_info = {
-                'time': datetime.now().strftime('%H:%M:%S'),
-                'total_flies': total_flies,
-                'all_below_L1': all_below_L1
-            }
-            
-            # ตรวจสอบเงื่อนไข: ถ้าแมลงทั้งหมดอยู่ใต้ L1 → ตั้งเวลารอ 5 วินาที
-            if all_below_L1:
-                print(">>> แมลงทั้งหมดอยู่ใต้เส้น L1 - จะแคปภาพอีกครั้งเมื่อครบ 5 วินาที!")
-                waiting_for_5sec_capture = True
-                capture_5sec_time = current_time
-            else:
-                if total_flies == 0:
-                    print(">>> ไม่มีแมลง - ไม่แคปภาพเพิ่ม")
-                else:
-                    print(">>> มีแมลงอยู่เหนือเส้น L1 - ไม่แคปภาพเพิ่ม")
-                
-                # ส่งสัญญาณกลับไป ESP32 ให้เคาะแมลงวัน
-                if ser:
-                    try:
-                        ser.write(b'TAP\n')
-                        print(">>> ส่งสัญญาณ 'TAP' ไปยัง ESP32 เพื่อเคาะแมลงวัน!")
-                    except Exception as e:
-                        print(f"Error sending TAP command: {e}")
-            
-            print(f"{'='*50}\n")
+        # แสดงผลขนาดเต็ม (ไม่ resize)
+        cv2.imshow("Fly Counter - Auto Mode", gui_img)
         
-        # แสดงข้อมูลบน display frame
-        cv2.putText(display_frame, status_text, (w - 450, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+        # Set mouse callback with button positions
+        cv2.setMouseCallback("Fly Counter - Auto Mode", mouse_callback, 
+                            (start_btn_rect, stop_btn_rect, ser))
         
-        if last_trigger_info:
-            result_text = f"Last: {last_trigger_info['time']} | Flies: {last_trigger_info['total_flies']}"
-            result_color = (0, 255, 0) if last_trigger_info['all_below_L1'] else (0, 165, 255)
-            cv2.putText(display_frame, result_text, (20, h - 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, result_color, 2)
-        
-        cv2.putText(display_frame, f"Snapshots: {snapshot_count}", (w - 300, 80),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # แสดงผล
-        scale_percent = 50
-        width = int(display_frame.shape[1] * scale_percent / 100)
-        height = int(display_frame.shape[0] * scale_percent / 100)
-        resized = cv2.resize(display_frame, (width, height))
-        
-        cv2.imshow("Fly Counter - Live Camera", resized)
-        
-        # ควบคุมด้วยคีย์บอร์ด
+        # ตรวจสอบคีย์บอร์ด
         key = cv2.waitKey(1) & 0xFF
         
         if key == ord('q'):
             break
-        elif key == ord('t'):
-            # จำลองสัญญาณ
-            trigger_queue.put(True)
     
     # ปิดทุกอย่าง
     print("\nกำลังปิดโปรแกรม...")
+    if is_running:
+        send_esp32_command(ser, 'motor_stop')
+    
     cap.release()
     cv2.destroyAllWindows()
     if ser:
