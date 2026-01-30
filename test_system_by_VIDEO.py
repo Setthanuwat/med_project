@@ -134,9 +134,16 @@ except Exception as e:
 # ========================= 
 is_running = False
 emergency_stop = False
+waiting_for_record = False  # <<< เพิ่มใหม่: รอรับ "record" จาก ESP32
 waiting_for_5sec_capture = False
 capture_5sec_time = 0
 WAIT_DURATION = 5
+
+# =========================
+# SERIAL RECEIVE BUFFER (สำหรับเก็บข้อมูลที่รับจาก ESP32)
+# =========================
+serial_buffer = ""
+received_record_signal = False  # <<< เพิ่มใหม่: flag บอกว่ารับ "record" แล้ว
 
 # ========================= 
 # ESP32 SERIAL HANDLER
@@ -153,8 +160,54 @@ def send_esp32_command(ser, command):
             return False
     else:
         print(f">>> [จำลอง] ส่งคำสั่ง '{command}' ไปยัง ESP32")
-        ser.write(f'{command}\n'.encode())
+        if ser:
+            try:
+                ser.write(f'{command}\n'.encode())
+                print(f"{command}")
+            except:
+                pass
         return True
+
+def read_esp32_serial(ser):
+    """อ่านข้อมูลจาก ESP32 แบบ non-blocking"""
+    global serial_buffer, received_record_signal
+    
+    if ser is None:
+        return None
+    
+    try:
+        # ตรวจสอบว่ามีข้อมูลรอรับหรือไม่
+        if ser.in_waiting > 0:
+            # อ่านข้อมูลที่มีอยู่ทั้งหมด
+            data = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+            serial_buffer += data
+            
+            # ตรวจสอบว่ามี newline (ข้อความครบบรรทัด) หรือไม่
+            while '\n' in serial_buffer:
+                line, serial_buffer = serial_buffer.split('\n', 1)
+                line = line.strip()
+                
+                if line:
+                    print(f"<<< รับจาก ESP32: '{line}'")
+                    
+                    # ตรวจสอบว่าเป็น "record" หรือไม่
+                    if line.lower() == 'record':
+                        received_record_signal = True
+                        print(">>> ได้รับสัญญาณ 'record' จาก ESP32!")
+                        return 'record'
+                    
+                    return line
+    except Exception as e:
+        print(f"Error reading from ESP32: {e}")
+    
+    return None
+
+def simulate_record_signal():
+    """จำลองสัญญาณ record สำหรับโหมดทดสอบ (ไม่มี ESP32)"""
+    global received_record_signal
+    # ในโหมดทดสอบ จะจำลองว่าได้รับ record ทันทีหลังจากรอ 0.5 วินาที
+    received_record_signal = True
+    print(">>> [จำลอง] ได้รับสัญญาณ 'record' จาก ESP32!")
 
 # =========================
 # YOLO HELPER FUNCTIONS
@@ -304,35 +357,153 @@ def detect_flies_yolo(crop_info, conf_threshold=0.25):
     
     return detections
 
-def remove_duplicates(all_detections, iou_threshold=0.5):
-    """ลบ detection ที่ซ้ำกันด้วย NMS"""
+def merge_detections_from_both_methods(opencv_dets, yolo_dets, overlap_threshold=0.3):
+    """
+    Merge detections จาก OpenCV และ YOLO โดยกรองกรอบที่ซ้ำกัน
+    
+    Parameters:
+    -----------
+    opencv_dets : list
+        Detection จาก OpenCV (มี keys: 'x', 'y', 'w', 'h', 'method')
+    yolo_dets : list
+        Detection จาก YOLO (มี keys: 'x', 'y', 'w', 'h', 'conf', 'method')
+    overlap_threshold : float
+        เปอร์เซ็นต์การทับกันที่ถือว่าเป็นตัวเดียวกัน (แนะนำ 0.3-0.5)
+    
+    Returns:
+    --------
+    list : รายการ detection ที่ merge แล้ว (ไม่มีซ้ำ)
+    """
+    
+    # ถ้าไม่มี YOLO detections ให้ return OpenCV อย่างเดียว
+    if len(yolo_dets) == 0:
+        return opencv_dets
+    
+    # ถ้าไม่มี OpenCV detections ให้ return YOLO อย่างเดียว
+    if len(opencv_dets) == 0:
+        return yolo_dets
+    
+    merged = []
+    used_opencv = [False] * len(opencv_dets)
+    
+    # วนลูป YOLO detection แต่ละตัว
+    for yolo_det in yolo_dets:
+        y_x, y_y, y_w, y_h = yolo_det['x'], yolo_det['y'], yolo_det['w'], yolo_det['h']
+        y_area = y_w * y_h
+        
+        best_match_idx = -1
+        best_overlap = 0
+        
+        # หา OpenCV detection ที่ทับกันมากที่สุด
+        for i, opencv_det in enumerate(opencv_dets):
+            if used_opencv[i]:  # ถ้าใช้ไปแล้วข้าม
+                continue
+            
+            o_x, o_y, o_w, o_h = opencv_det['x'], opencv_det['y'], opencv_det['w'], opencv_det['h']
+            o_area = o_w * o_h
+            
+            # คำนวณพื้นที่ทับกัน
+            xi1 = max(y_x, o_x)
+            yi1 = max(y_y, o_y)
+            xi2 = min(y_x + y_w, o_x + o_w)
+            yi2 = min(y_y + y_h, o_y + o_h)
+            
+            inter_w = max(0, xi2 - xi1)
+            inter_h = max(0, yi2 - yi1)
+            intersection = inter_w * inter_h
+            
+            if intersection > 0:
+                smaller_area = min(y_area, o_area)
+                overlap_percent = intersection / smaller_area
+                
+                # ถ้าทับกันมากกว่า threshold และมากกว่าที่เจอมา
+                if overlap_percent > overlap_threshold and overlap_percent > best_overlap:
+                    best_overlap = overlap_percent
+                    best_match_idx = i
+        
+        # ถ้าเจอ match ให้เลือกตัวที่ดีกว่า (YOLO มี confidence สูงกว่า)
+        if best_match_idx >= 0:
+            used_opencv[best_match_idx] = True  # mark ว่าใช้ไปแล้ว
+            # เลือกใช้ YOLO detection (เพราะมี confidence)
+            merged.append(yolo_det)
+        else:
+            # ไม่เจอ match ให้เพิ่ม YOLO detection เข้าไป
+            merged.append(yolo_det)
+    
+    # เพิ่ม OpenCV detections ที่ยังไม่ได้ใช้
+    for i, opencv_det in enumerate(opencv_dets):
+        if not used_opencv[i]:
+            merged.append(opencv_det)
+    
+    return merged
+
+def remove_duplicates(all_detections, overlap_threshold=0.5):
+    """
+    ลบ detection ที่ทับกันมากเกินไป
+    
+    Parameters:
+    -----------
+    all_detections : list
+        รายการ detection แต่ละตัวต้องมี keys: 'x', 'y', 'w', 'h', 'conf'
+    overlap_threshold : float (0.0-1.0)
+        เปอร์เซ็นต์การทับกันที่ยอมรับได้
+        - 0.3 = ยอมให้ทับกันได้ 30% (เข้มงวด - กำจัดกรอบที่ใกล้กันมาก)
+        - 0.5 = ยอมให้ทับกันได้ 50% (ปานกลาง - แนะนำ)
+        - 0.7 = ยอมให้ทับกันได้ 70% (หลวม - เก็บกรอบไว้เยอะ)
+        
+    Returns:
+    --------
+    list : รายการ detection ที่กรองแล้ว
+    
+    วิธีการทำงาน:
+    -------------
+    1. เรียง detection ตาม confidence จากมากไปน้อย
+    2. เก็บ detection ที่มี confidence สูงสุดไว้ก่อน
+    3. ตรวจสอบ detection ถัดไปว่าทับกับที่เก็บไว้แล้วหรือไม่
+    4. ถ้าทับกันมากเกิน threshold ก็ลบทิ้ง (เก็บแค่ตัวที่ confidence สูงกว่า)
+    """
     if len(all_detections) == 0:
         return []
     
-    boxes = []
-    scores = []
+    # เรียงตาม confidence จากมากไปน้อย
+    sorted_dets = sorted(all_detections, key=lambda x: x['conf'], reverse=True)
     
-    for det in all_detections:
-        x, y, w, h = det['x'], det['y'], det['w'], det['h']
-        boxes.append([x, y, x+w, y+h])
-        scores.append(det['conf'])
+    keep = []
     
-    boxes = np.array(boxes)
-    scores = np.array(scores)
+    for i, det1 in enumerate(sorted_dets):
+        should_keep = True
+        x1, y1, w1, h1 = det1['x'], det1['y'], det1['w'], det1['h']
+        area1 = w1 * h1
+        
+        # เปรียบเทียบกับกรอบที่เก็บไว้แล้ว
+        for det2 in keep:
+            x2, y2, w2, h2 = det2['x'], det2['y'], det2['w'], det2['h']
+            area2 = w2 * h2
+            
+            # คำนวณพื้นที่ทับกัน (intersection)
+            xi1 = max(x1, x2)
+            yi1 = max(y1, y2)
+            xi2 = min(x1 + w1, x2 + w2)
+            yi2 = min(y1 + h1, y2 + h2)
+            
+            inter_width = max(0, xi2 - xi1)
+            inter_height = max(0, yi2 - yi1)
+            intersection = inter_width * inter_height
+            
+            if intersection > 0:
+                # คำนวณเปอร์เซ็นต์การทับกันเทียบกับกรอบที่เล็กกว่า
+                smaller_area = min(area1, area2)
+                overlap_percent = intersection / smaller_area
+                
+                # ถ้าทับกันมากเกิน threshold ให้ลบกรอบนี้
+                if overlap_percent > overlap_threshold:
+                    should_keep = False
+                    break
+        
+        if should_keep:
+            keep.append(det1)
     
-    indices = cv2.dnn.NMSBoxes(
-        boxes.tolist(),
-        scores.tolist(),
-        score_threshold=0.0,
-        nms_threshold=iou_threshold
-    )
-    
-    filtered = []
-    if len(indices) > 0:
-        for i in indices.flatten():
-            filtered.append(all_detections[i])
-    
-    return filtered
+    return keep
 
 # ========================= 
 # PROCESS FRAME FUNCTION (OpenCV Only)
@@ -563,7 +734,10 @@ def process_frame_with_yolo(img):
                     
                     all_tube_detections.extend(detections)
                 
-                unique_detections = remove_duplicates(all_tube_detections, iou_threshold=0.4)
+                unique_detections = remove_duplicates(
+                                    all_tube_detections,
+                                    overlap_threshold=0.5
+                                )
                 
                 for det in unique_detections:
                     yolo_detections.append({
@@ -578,8 +752,12 @@ def process_frame_with_yolo(img):
             print(f"  YOLO detected: {len(yolo_detections)} flies")
         
         # COMBINE
-        all_detections = opencv_detections + yolo_detections
-        
+        all_detections = merge_detections_from_both_methods(
+            opencv_detections, 
+            yolo_detections, 
+            overlap_threshold=0.3  # ปรับค่านี้ได้ (0.3 = เข้มงวด, 0.5 = ปานกลาง)
+        )
+                
         level_counts = [0] * LEVEL_COUNT
         
         for det in all_detections:
@@ -871,13 +1049,19 @@ def create_gui_frame(orig, fly_counts, tube_level_results, tube_level_scores):
 # =========================
 # DRAW BUTTONS ON SIDEBAR
 # =========================
-def draw_buttons(sidebar_img, is_running):
+def draw_buttons(sidebar_img, is_running, waiting_for_record=False):
     """วาดปุ่ม Start และ Emergency Stop บน sidebar"""
     button_x = BUTTON_MARGIN
     
     # Start Button
     start_y = BUTTON_START_Y
-    start_color = (100, 200, 100) if not is_running else (150, 150, 150)
+    if waiting_for_record:
+        start_color = (0, 200, 255)  # สีส้ม - รอ record
+    elif is_running:
+        start_color = (150, 150, 150)  # สีเทา - กำลัง running
+    else:
+        start_color = (100, 200, 100)  # สีเขียว - พร้อม start
+    
     cv2.rectangle(sidebar_img, 
                   (button_x, start_y), 
                   (button_x + BUTTON_WIDTH, start_y + BUTTON_HEIGHT),
@@ -887,12 +1071,18 @@ def draw_buttons(sidebar_img, is_running):
                   (button_x + BUTTON_WIDTH, start_y + BUTTON_HEIGHT),
                   (0, 0, 0), 3)
     
-    text = "START" if not is_running else "RUNNING..."
-    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+    if waiting_for_record:
+        text = "WAITING RECORD..."
+    elif is_running:
+        text = "RUNNING..."
+    else:
+        text = "START"
+    
+    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
     text_x = button_x + (BUTTON_WIDTH - text_size[0]) // 2
     text_y = start_y + (BUTTON_HEIGHT + text_size[1]) // 2
     cv2.putText(sidebar_img, text, (text_x, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
     
     # Emergency Stop Button
     stop_y = start_y + BUTTON_HEIGHT + BUTTON_MARGIN
@@ -933,7 +1123,7 @@ def save_snapshot_with_gui(frame, timestamp, total_flies, fly_counts, level_resu
 # =========================
 def mouse_callback(event, x, y, flags, param):
     """จัดการคลิกเมาส์บนปุ่ม"""
-    global is_running, emergency_stop
+    global is_running, emergency_stop, waiting_for_record, received_record_signal
     
     if event == cv2.EVENT_LBUTTONDOWN:
         start_btn, stop_btn, ser = param
@@ -947,17 +1137,21 @@ def mouse_callback(event, x, y, flags, param):
                 print("="*60)
                 is_running = True
                 emergency_stop = False
+                waiting_for_record = False
+                received_record_signal = False
                 send_esp32_command(ser, 'motor_start')
         
         # ตรวจสอบว่าคลิกที่ Emergency Stop Button หรือไม่
         elif (stop_btn[0] <= x <= stop_btn[0] + stop_btn[2] and
               stop_btn[1] <= y <= stop_btn[1] + stop_btn[3]):
-            if is_running:
+            if is_running or waiting_for_record:
                 print("\n" + "="*60)
                 print(">>> กดปุ่ม EMERGENCY STOP - หยุดฉุกเฉิน")
                 print("="*60)
                 is_running = False
                 emergency_stop = True
+                waiting_for_record = False
+                received_record_signal = False
                 send_esp32_command(ser, 'emergency_stop')
 
 # ========================= 
@@ -965,6 +1159,7 @@ def mouse_callback(event, x, y, flags, param):
 # ========================= 
 def main():
     global is_running, emergency_stop, waiting_for_5sec_capture, capture_5sec_time
+    global waiting_for_record, received_record_signal, serial_buffer
     
     # เปิดแหล่งวิดีโอ (กล้องหรือไฟล์)
     if USE_VIDEO_FILE:
@@ -989,9 +1184,9 @@ def main():
     
     # เชื่อมต่อ ESP32
     ser = None
-    if ENABLE_ESP32 == False or ENABLE_ESP32 == True :
+    if ENABLE_ESP32:
         try:
-            ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=1)
+            ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=0.01)  # timeout สั้นสำหรับ non-blocking read
             time.sleep(2)
             print(f"✓ เชื่อมต่อ ESP32 ที่ {ESP32_PORT} สำเร็จ")
         except Exception as e:
@@ -1000,6 +1195,13 @@ def main():
             ser = None
     else:
         print("✓ โหมดทดสอบ - ไม่เชื่อมต่อ ESP32")
+        # ลองเชื่อมต่อ Serial แต่ไม่บังคับ
+        try:
+            ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=0.01)
+            time.sleep(2)
+            print(f"  (เชื่อมต่อ Serial สำรอง: {ESP32_PORT})")
+        except:
+            ser = None
     
     print(f"\n{'='*50}")
     print(f"โหมด: {'VIDEO FILE' if USE_VIDEO_FILE else 'CAMERA'}")
@@ -1013,13 +1215,20 @@ def main():
         print("  - กด 'r' เพื่อ Restart วิดีโอ")
     print("  - กดปุ่มขยายหน้าต่างมุมขวาบนเพื่อขยายเต็มจอ")
     print("  - กด 'q' เพื่อออกจากโปรแกรม")
+    print(f"{'='*50}")
+    print("การทำงานใหม่:")
+    print("  1. แมลงลงใต้ L1 → ส่ง motor_stop")
+    print("  2. รอรับ 'record' จาก ESP32")
+    print("  3. เริ่มนับ 5 วินาที → แคปภาพ")
     print(f"{'='*50}\n")
     
     frame_count = 0
     snapshot_count = 0
     last_check_result = None
     paused = False
-    frame = None  # Initialize frame
+    frame = None
+    motor_stop_sent_time = None  # เวลาที่ส่ง motor_stop (สำหรับ timeout)
+    RECORD_TIMEOUT = 10  # timeout รอ record 10 วินาที (ปรับได้)
     
     # สร้างหน้าต่างและ set mouse callback
     cv2.namedWindow("Fly Counter - Test Mode", cv2.WINDOW_NORMAL)
@@ -1031,7 +1240,6 @@ def main():
                 if USE_VIDEO_FILE:
                     print("\n🎬 วิดีโอเล่นจบแล้ว - กด 'r' เพื่อเริ่มใหม่ หรือ 'q' เพื่อออก")
                     paused = True
-                    # ถ้ายังไม่มี frame เลย ให้ข้ามไป
                     if frame is None:
                         key = cv2.waitKey(100) & 0xFF
                         if key == ord('q'):
@@ -1047,38 +1255,46 @@ def main():
                     break
             else:
                 frame = new_frame
-        else:
-            # ถ้า paused ให้ใช้ frame เดิม
-            pass
         
-        # ตรวจสอบว่ามี frame หรือไม่
         if frame is None:
             continue
             
         frame_count += 1
         current_time = time.time()
         
+        # อ่านข้อมูลจาก ESP32 (ทำทุก loop)
+        if ser is not None:
+            serial_data = read_esp32_serial(ser)
+        
         # สร้าง display frame
         display_frame = frame.copy()
         h, w = display_frame.shape[:2]
         
-        # ถ้ากำลัง running จะประมวลผลด้วย OpenCV
+        # ถ้ากำลัง running และไม่ emergency stop และไม่ pause
         if is_running and not emergency_stop and not paused:
             # ประมวลผล
             processed_frame, all_below_L1, total_flies, fly_counts, level_results, level_scores = process_frame(frame)
             display_frame = processed_frame
             
-            # ตรวจสอบสถานะแมลงวัน
-            if not waiting_for_5sec_capture:
-                # ตรวจสอบว่าแมลงอยู่ใต้ L1 หรือยัง
+            # STATE MACHINE
+            if not waiting_for_record and not waiting_for_5sec_capture:
+                # STATE 1: ตรวจสอบว่าแมลงอยู่ใต้ L1 หรือยัง
                 if all_below_L1 and total_flies > 0:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] >>> แมลงทั้งหมดอยู่ใต้เส้น L1 - เริ่มนับ 5 วินาที")
-                    waiting_for_5sec_capture = True
-                    capture_5sec_time = current_time
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] >>> แมลงทั้งหมดอยู่ใต้เส้น L1 - ส่ง motor_stop และรอ 'record'")
                     send_esp32_command(ser, 'motor_stop')
+                    waiting_for_record = True
+                    received_record_signal = False
+                    motor_stop_sent_time = current_time
+                    
+                    last_check_result = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'total_flies': total_flies,
+                        'all_below_L1': all_below_L1,
+                        'status': "Waiting for 'record' signal..."
+                    }
                 else:
                     # แมลงยังไม่ลงครบ - ส่งสัญญาณ motor_start ต่อเนื่อง
-                    if frame_count % 30 == 0:  # ทุก 30 frames
+                    if frame_count % 30 == 0:
                         send_esp32_command(ser, 'motor_start')
                     
                     last_check_result = {
@@ -1087,9 +1303,47 @@ def main():
                         'all_below_L1': all_below_L1,
                         'status': 'Waiting for flies to settle...'
                     }
-            else:
-                # กำลังรอครบ 5 วินาที
+            
+            elif waiting_for_record:
+                # STATE 2: รอรับ "record" จาก ESP32
                 
+                # ตรวจสอบว่าได้รับ record หรือยัง
+                if received_record_signal:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] >>> ได้รับ 'record' - เริ่มนับ 5 วินาที")
+                    waiting_for_record = False
+                    waiting_for_5sec_capture = True
+                    capture_5sec_time = current_time
+                    
+                    last_check_result = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'total_flies': total_flies,
+                        'all_below_L1': all_below_L1,
+                        'status': f'Record received! Counting 5s...'
+                    }
+                # else:
+                #     # ยังไม่ได้รับ record
+                #     elapsed_wait = current_time - motor_stop_sent_time
+                    
+                #     # จำลองสัญญาณ record สำหรับโหมดทดสอบ (ไม่มี ESP32 จริง)
+                #     if not ENABLE_ESP32 and elapsed_wait >= 0.5:
+                #         simulate_record_signal()
+                    
+                #     # ตรวจสอบ timeout
+                #     if elapsed_wait > RECORD_TIMEOUT:
+                #         print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Timeout รอ 'record' - รีเซ็ตและลองใหม่")
+                #         waiting_for_record = False
+                #         received_record_signal = False
+                #         send_esp32_command(ser, 'motor_start')
+                #     else:
+                #         last_check_result = {
+                #             'time': datetime.now().strftime('%H:%M:%S'),
+                #             'total_flies': total_flies,
+                #             'all_below_L1': all_below_L1,
+                #             'status': f"Waiting for 'record'... ({elapsed_wait:.1f}s)"
+                #         }
+            
+            elif waiting_for_5sec_capture:
+                # STATE 3: กำลังรอครบ 5 วินาที
                 elapsed = current_time - capture_5sec_time
                 remaining = WAIT_DURATION - elapsed
                 
@@ -1098,7 +1352,7 @@ def main():
                         'time': datetime.now().strftime('%H:%M:%S'),
                         'total_flies': total_flies,
                         'all_below_L1': all_below_L1,
-                        'status': f'Waiting for 5s capture: {remaining:.1f}s'
+                        'status': f'Counting down: {remaining:.1f}s'
                     }
                 else:
                     # ครบ 5 วินาที - แคปภาพด้วย DUAL ALGORITHM
@@ -1123,6 +1377,8 @@ def main():
                     
                     # รีเซ็ตสถานะและหยุด
                     waiting_for_5sec_capture = False
+                    waiting_for_record = False
+                    received_record_signal = False
                     is_running = False
                     last_check_result = {
                         'time': datetime.now().strftime('%H:%M:%S'),
@@ -1144,8 +1400,8 @@ def main():
         gui_img[:, :SIDEBAR_WIDTH] = SIDEBAR_COLOR
         gui_img[:h_crop, SIDEBAR_WIDTH:SIDEBAR_WIDTH+w_crop] = cropped_display
         
-        # วาดปุ่ม
-        gui_img, start_btn_rect, stop_btn_rect = draw_buttons(gui_img, is_running)
+        # วาดปุ่ม (ส่ง waiting_for_record ไปด้วย)
+        gui_img, start_btn_rect, stop_btn_rect = draw_buttons(gui_img, is_running, waiting_for_record)
         
         # แสดงสถานะ
         status_y = 50
@@ -1156,7 +1412,6 @@ def main():
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
         if USE_VIDEO_FILE:
-            # แสดง frame number และสถานะ pause
             frame_info = f"Frame: {frame_count}/{int(cap.get(cv2.CAP_PROP_FRAME_COUNT))}"
             if paused:
                 frame_info += " [PAUSED]"
@@ -1194,6 +1449,9 @@ def main():
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             frame_count = 0
             paused = False
+            waiting_for_record = False
+            waiting_for_5sec_capture = False
+            received_record_signal = False
             print("🔄 RESTART วิดีโอ")
     
     # ปิดทุกอย่าง
