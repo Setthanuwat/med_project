@@ -153,6 +153,7 @@ def send_esp32_command(ser, command):
             return False
     else:
         print(f">>> [จำลอง] ส่งคำสั่ง '{command}' ไปยัง ESP32")
+        ser.write(f'{command}\n'.encode())
         return True
 
 # =========================
@@ -988,7 +989,7 @@ def main():
     
     # เชื่อมต่อ ESP32
     ser = None
-    if ENABLE_ESP32:
+    if ENABLE_ESP32 == False or ENABLE_ESP32 == True :
         try:
             ser = serial.Serial(ESP32_PORT, ESP32_BAUDRATE, timeout=1)
             time.sleep(2)
@@ -1088,6 +1089,7 @@ def main():
                     }
             else:
                 # กำลังรอครบ 5 วินาที
+                
                 elapsed = current_time - capture_5sec_time
                 remaining = WAIT_DURATION - elapsed
                 
